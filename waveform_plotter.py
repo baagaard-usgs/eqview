@@ -42,6 +42,12 @@ location = *
 window_preevent = 10.0
 window_total = 70.0
 
+[processing]
+remove_bg = True
+preevent_threshold_reduction = 2.0
+store_noise = False
+wavelet = coif4
+
 [map]
 width_pixels = 4096
 height_pixels = 4096
@@ -53,6 +59,12 @@ show_axes = True,
 show_labels = True,
 mechanism_size = 100
 mechanism_color = ltred
+
+[noise_figure]
+height = 7.5
+width = 10.0
+margins = ((0.6, 0.5, 0.2), (0.5, 0.5, 0.8))
+
 
 [record_section]
 width = 7.5,
@@ -68,6 +80,7 @@ stations = stations_%%s.xml
 waveforms_raw = waveforms_raw.mseed
 waveforms_acc = waveforms_acc.p
 waveforms_vel = waveforms_vel.p
+plots = plots
 maptiles = ~/scratch/images/tiles
 """
 
@@ -124,6 +137,8 @@ class WaveformData(object):
         self.event = None
         self.inventory = {}
         self.stream = None
+        self.acc = None
+        self.vel = None
         return
 
     def fetch_event(self):
@@ -254,7 +269,10 @@ class WaveformData(object):
     def process_waveforms(self):
         import obspyutils.rotate
         import obspyutils.metadata
+        import obspyutils.noise
         import pyproj
+        import cPickle
+        import math
         
         if self.showProgress:
             print("Processing recorded waveforms...")
@@ -269,27 +287,32 @@ class WaveformData(object):
             else:
                 inventory += inventoryDC
 
-        stream = self._get_stream()
-        stream.attach_response(inventory)
+        stream = self._get_raw_stream()
+        #stream.attach_response(inventory)
 
         # Add metadata
-        obspyutils.metadata.addLocation(inventory, stream)
-        utmZone = int(math.floor(hypocenter.longitude + 180.0)/6.0) + 1
-        proj = pyproj.Proj(proj="utm", zone=utmZone, ellps="WGS84")
-        obspyutils.metadata.addAzimuthDist(stream, epicenter=(hypocenter.longitude, hypocenter.latitude), projection=proj)
+        #obspyutils.metadata.addLocation(inventory, stream)
+        #utmZone = int(math.floor(hypocenter.longitude + 180.0)/6.0) + 1
+        #proj = pyproj.Proj(proj="utm", zone=utmZone, ellps="WGS84")
+        #obspyutils.metadata.addAzimuthDist(stream, epicenter=(hypocenter.longitude, hypocenter.latitude), projection=proj)
 
         # Strong-motion acceleration traces
         smAcc = stream.select(channel="HN?")
-        smAcc.remove_response(output="ACC")
+        #smAcc.remove_response(output="ACC")
         # Remove noise and perform baseline correction
-        obspyutils.baselinecorrection.denoise(smAcc)
+        removeBg = self.params.getboolean("processing", "remove_bg")
+        preWindow = self.params.getfloat("waveforms", "window_preevent")
+        preThreshold = self.params.getfloat("processing", "preevent_threshold_reduction")
+        storeNoise = self.params.getboolean("processing", "store_noise")
+        wavelet = self.params.get("processing", "wavelet")
+        #obspyutils.noise.denoise(smAcc, removeBg, preWindow, preThreshold, storeNoise, wavelet)
         # :TODO: add baseline correction
         smVel = smAcc.copy().integrate()
 
         # Broadband velocity traces
         bbVel = stream.select(channel="HH?")
         bbVel += stream.select(channel="EH?")
-        bbVel.remove_response(output="VEL")
+        #bbVel.remove_response(output="VEL")
         bbAcc = bbVel.copy().differentiate()
 
         # Combine strong-motion and broadband streams
@@ -297,15 +320,30 @@ class WaveformData(object):
         self.vel = smVel + bbVel
         
         # Rotate
-        for s in [acc, vel]:
-            obspyutils.rotate.toENZ(inventory, s)
+        #for s in [self.acc, self.vel]:
+        #    s = obspyutils.rotate.toENZ(inventory, s)
 
-        with open(_data_filename(self.params, "acc"), "w") as fout:
+        with open(_data_filename(self.params, "waveforms_acc"), "w") as fout:
             cPickle.Pickler(fout, protocol=-1).dump(self.acc)
-        with open(_data_filename(self.params, "vel"), "w") as fout:
+        with open(_data_filename(self.params, "waveforms_vel"), "w") as fout:
             cPickle.Pickler(fout, protocol=-1).dump(self.vel)
         return
 
+    def load_processed_waveforms(self):
+        """Load processed data.
+        """
+        import cPickle
+        if self.showProgress:
+            print("Loading processed waveforms...")            
+
+        if self.acc is None:
+            with open(_data_filename(self.params, "waveforms_acc"), "r") as fin:
+                self.acc = cPickle.Unpickler(fin).load()
+        if self.vel is None:
+            with open(_data_filename(self.params, "waveforms_vel"), "r") as fin:
+                self.vel = cPickle.Unpickler(fin).load()
+        return
+    
     def _get_event(self):
         """Read event if not already loaded.
 
@@ -329,14 +367,24 @@ class WaveformData(object):
             self.inventory[dataCenter] = obspy.core.inventory.read_inventory(_data_filename(self.params, "stations", dataCenter), format="STATIONXML")
         return self.inventory[dataCenter]
             
-    def _get_stream(self):
-        """Read stream if not already loaded.
+    def _get_raw_stream(self):
+        """Read raw stream if not already loaded.
 
         :returns: Waveform data stream
         """
         if self.stream is None:
             import obspy.core.stream
-            self.stream = obspy.core.stream.read(self.params.get("files", "waveforms_raw"), format="MSEED")
+            self.stream = obspy.core.stream.read(_data_filename(self.params, "waveforms_raw"), format="MSEED")
+        return self.stream
+
+    def _get_processed_stream(self):
+        """Read processed stream if not already loaded.
+
+        :returns: Waveform data stream
+        """
+        if self.stream is None:
+            import obspy.core.stream
+            self.stream = obspy.core.stream.read(_data_filename(self.params, "waveforms_raw"), format="MSEED")
         return self.stream
 
     def _select_channels(self, station):
@@ -375,8 +423,148 @@ class WaveformData(object):
 # ----------------------------------------------------------------------
 class NoiseFigure(object):
     """
+    Rows are original, denoised, and noise.
+    Columns are coefficients, acceleration, velocity, and displacement.
     """
 
+    ROWS = ["orig", "signal", "noise"]
+    COLS = ["coefs", "acc", "vel", "disp"]
+    
+    def __init__(self, params, showProgress):
+        """
+        """
+        self.params = params
+        self.showProgress = showProgress
+        return
+
+
+    def plot(self, data):
+        """
+        """
+        from ast import literal_eval
+        import pywt
+        import sys
+        
+        if self.showProgress:
+            print("Plotting noise figures...")
+
+        from basemap.Figure import Figure
+        
+        self.figure = Figure()
+        w = self.params.getfloat("noise_figure", "width")
+        h = self.params.getfloat("noise_figure", "height")
+        margins = literal_eval(self.params.get("noise_figure", "margins"))
+        self.figure.open(w, h, margins)
+
+        self._setupSubplots()
+
+        smAcc = data.acc.select(channel="HN?")
+        preWindow = self.params.getfloat("waveforms", "window_preevent")
+        numTraces = len(smAcc)
+        for itr,trAcc in enumerate(smAcc[:3]):
+
+            info = "%s.%s.%s" % (trAcc.stats.network, trAcc.stats.station, trAcc.stats.channel)
+
+            data = {
+                #"orig": trAcc.dataOrig,
+                #"signal": trAcc.data,
+                #"noise": trAcc.dataNoise,
+                "orig": trAcc.data,
+                "signal": trAcc.data,
+                "noise": trAcc.data,
+            }
+            t = trAcc.times()
+
+            for row in NoiseFigure.ROWS:
+                # Coefficients
+                ax,line = self.axes[row+"_coefs"]
+                coefs = pywt.wavedec(data[row], self.params.get("processing", "wavelet"))
+                cArray,cSlices = pywt.coeffs_to_array(coefs)
+                ax.plot(cArray)
+                #line.set_ydata(cArray)
+                
+                acc, vel, disp = self._integrate(t, data[row], preWindow)
+                if t.shape[-1] > acc.shape[-1]:
+                    t = t[:-1]
+                
+                # Acceleration
+                ax,line = self.axes[row+"_acc"]
+                ax.plot(t, acc)
+                #line.set_xdata(t)
+                #line.set_ydata(acc)
+
+                # Velocity
+                ax,line = self.axes[row+"_vel"]
+                ax.plot(t, vel)
+                #line.set_xdata(t)
+                #line.set_ydata(vel)
+
+                # Displacement
+                ax,line = self.axes[row+"_disp"]
+                ax.plot(t, disp)
+                #line.set_xdata(t)
+                #line.set_ydata(disp)
+
+            #self.figure.figure.canvas.flush_events()
+            #self.figure.figure.canvas.draw() # TEMPORARY
+            plotsDir = os.path.join(_data_filename(self.params, "plots"))
+            if not os.path.isdir(plotsDir):
+                os.makedirs(plotsDir)
+            self.figure.figure.savefig(os.path.join(plotsDir, info+".png"))
+            #self.figure.figure.clear()
+
+            if self.showProgress:
+                sys.stdout.write("\r%d%%" % (((itr+1)*100)/numTraces))
+                sys.stdout.flush()
+        if self.showProgress:
+            sys.stdout.write("\n")
+            
+        return
+
+    def _setupSubplots(self):
+        """
+        """
+        TITLES = {
+            "coefs": "Coefficients (all levels)",
+            "acc": "Acceleration (m/s**2)",
+            "vel": "Velocity (m/s)",
+            "disp": "Displacement (m)",
+        }
+        nrows = len(NoiseFigure.ROWS)
+        ncols = len(NoiseFigure.COLS)
+        
+        self.axes = {}
+        for irow,row in enumerate(NoiseFigure.ROWS):
+            for icol,col in enumerate(NoiseFigure.COLS):
+                ax = self.figure.axes(nrows, ncols, irow+1, icol+1)
+                if irow == 0:
+                    ax.set_title(TITLES[col])
+                #line, = ax.plot([0], [0], '-')
+                line = None
+                self.axes["%s_%s" % (row,col)] = (ax,line)
+
+        return
+    
+    def _integrate(self, t, acc, preevent_window=10.0):
+        """
+        """
+        dt = t[1]-t[0]
+        numPreWindow = 1+int(preevent_window/dt)
+
+        poly = numpy.polyfit(t[:numPreWindow], numpy.cumsum(acc[:numPreWindow])*dt, 1)
+        acc -= int(poly[0])
+
+        vel = numpy.cumsum(acc)*dt
+        poly = numpy.polyfit(t[:numPreWindow], numpy.cumsum(vel[:numPreWindow])*dt, 1)
+        vel -= poly[0]
+        
+        disp = numpy.cumsum(vel)*dt
+        poly = numpy.polyfit(t[:numPreWindow], numpy.cumsum(disp[:numPreWindow])*dt, 1)
+        disp -= poly[0]
+        
+        return acc, vel, disp
+    
+    
 # ----------------------------------------------------------------------
 class WaveformsMap(object):
     """
@@ -601,16 +789,19 @@ if __name__ == "__main__":
         data.process_waveforms()
 
     if args.plot_noise or args.all:
-        plotter = NoiseFigure(data)
-        plotter.plot()
+        plotter = NoiseFigure(app.params, args.show_progress)
+        data.load_processed_waveforms()
+        plotter.plot(data)
         
     if args.plot_map or args.all:
-        plotter = WaveformsMap(data)
-        plotter.plot()
+        plotter = WaveformsMap(app.params, args.show_progress)
+        data.load_processed_waveforms()
+        plotter.plot(data)
     
     if args.plot_section or args.all:
-        plotter = RecordSection(data)
-        plotter.plot()
+        plotter = RecordSection(app.params, args.show_progress)
+        data.load_processed_waveforms()
+        plotter.plot(data)
     
 
 # End of file
