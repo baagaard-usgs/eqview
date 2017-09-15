@@ -63,7 +63,7 @@ mechanism_color = ltred
 [noise_figure]
 height = 7.5
 width = 10.0
-margins = ((0.6, 0.5, 0.2), (0.5, 0.5, 0.8))
+margins = ((0.6, 0.5, 0.2), (0.5, 0.6, 0.7))
 
 
 [record_section]
@@ -288,31 +288,31 @@ class WaveformData(object):
                 inventory += inventoryDC
 
         stream = self._get_raw_stream()
-        #stream.attach_response(inventory)
+        stream.attach_response(inventory)
 
         # Add metadata
-        #obspyutils.metadata.addLocation(inventory, stream)
-        #utmZone = int(math.floor(hypocenter.longitude + 180.0)/6.0) + 1
-        #proj = pyproj.Proj(proj="utm", zone=utmZone, ellps="WGS84")
-        #obspyutils.metadata.addAzimuthDist(stream, epicenter=(hypocenter.longitude, hypocenter.latitude), projection=proj)
+        obspyutils.metadata.addLocation(inventory, stream)
+        utmZone = int(math.floor(hypocenter.longitude + 180.0)/6.0) + 1
+        proj = pyproj.Proj(proj="utm", zone=utmZone, ellps="WGS84")
+        obspyutils.metadata.addAzimuthDist(stream, epicenter=(hypocenter.longitude, hypocenter.latitude), projection=proj)
 
         # Strong-motion acceleration traces
         smAcc = stream.select(channel="HN?")
-        #smAcc.remove_response(output="ACC")
+        smAcc.remove_response(output="ACC")
         # Remove noise and perform baseline correction
         removeBg = self.params.getboolean("processing", "remove_bg")
         preWindow = self.params.getfloat("waveforms", "window_preevent")
         preThreshold = self.params.getfloat("processing", "preevent_threshold_reduction")
         storeNoise = self.params.getboolean("processing", "store_noise")
         wavelet = self.params.get("processing", "wavelet")
-        #obspyutils.noise.denoise(smAcc, removeBg, preWindow, preThreshold, storeNoise, wavelet)
+        obspyutils.noise.denoise(smAcc, removeBg, preWindow, preThreshold, storeNoise, wavelet)
         # :TODO: add baseline correction
         smVel = smAcc.copy().integrate()
 
         # Broadband velocity traces
         bbVel = stream.select(channel="HH?")
         bbVel += stream.select(channel="EH?")
-        #bbVel.remove_response(output="VEL")
+        bbVel.remove_response(output="VEL")
         bbAcc = bbVel.copy().differentiate()
 
         # Combine strong-motion and broadband streams
@@ -320,8 +320,8 @@ class WaveformData(object):
         self.vel = smVel + bbVel
         
         # Rotate
-        #for s in [self.acc, self.vel]:
-        #    s = obspyutils.rotate.toENZ(inventory, s)
+        for s in [self.acc, self.vel]:
+            s = obspyutils.rotate.toENZ(inventory, s)
 
         with open(_data_filename(self.params, "waveforms_acc"), "w") as fout:
             cPickle.Pickler(fout, protocol=-1).dump(self.acc)
@@ -396,11 +396,21 @@ class WaveformData(object):
         channels = station.channels
         if self.params.has_option("stations", "channel_required"):
             channels = self.params.get("stations", "channel_required")
+            for target in channels.split(","):
+                found = False
+                for channel in station.channels:
+                    if channel.code == target:
+                        found = True
+                        break
+                if not found:
+                    channels = None
+                    logging.getLogger(__name__).debug("Missing required channel %s for station %s." % (target, station.code,))
+                    break
         elif self.params.has_option("stations", "channel_priority"):
             channels = []
             for target in self.params.get("stations", "channel_priority").split(","):
                 for channel in station.channels:
-                    if channel.startswith(target):
+                    if channel.code.startswith(target):
                         channels.append(channel)
                 if len(channels) > 0:
                     break
@@ -427,7 +437,7 @@ class NoiseFigure(object):
     Columns are coefficients, acceleration, velocity, and displacement.
     """
 
-    ROWS = ["orig", "signal", "noise"]
+    ROWS = ["Original", "Signal", "Noise"]
     COLS = ["coefs", "acc", "vel", "disp"]
     
     def __init__(self, params, showProgress):
@@ -446,7 +456,7 @@ class NoiseFigure(object):
         import sys
         
         if self.showProgress:
-            print("Plotting noise figures...")
+            sys.stdout.write("Plotting noise figures...")
 
         from basemap.Figure import Figure
         
@@ -457,64 +467,48 @@ class NoiseFigure(object):
         self.figure.open(w, h, margins)
 
         self._setupSubplots()
+        self.figure.figure.canvas.draw()
 
         smAcc = data.acc.select(channel="HN?")
+        originTime = data._select_hypocenter().time
+        
         preWindow = self.params.getfloat("waveforms", "window_preevent")
         numTraces = len(smAcc)
-        for itr,trAcc in enumerate(smAcc[:3]):
+        for itr,trAcc in enumerate(smAcc):
 
             info = "%s.%s.%s" % (trAcc.stats.network, trAcc.stats.station, trAcc.stats.channel)
+            self.figure.figure.suptitle(info, fontweight='bold')
 
             data = {
-                #"orig": trAcc.dataOrig,
-                #"signal": trAcc.data,
-                #"noise": trAcc.dataNoise,
-                "orig": trAcc.data,
-                "signal": trAcc.data,
-                "noise": trAcc.data,
+                "Original": trAcc.dataOrig,
+                "Signal": trAcc.data,
+                "Noise": trAcc.dataNoise,
             }
-            t = trAcc.times()
+            t = trAcc.times()+(trAcc.stats.starttime-originTime)
 
             for row in NoiseFigure.ROWS:
                 # Coefficients
-                ax,line = self.axes[row+"_coefs"]
                 coefs = pywt.wavedec(data[row], self.params.get("processing", "wavelet"))
                 cArray,cSlices = pywt.coeffs_to_array(coefs)
-                ax.plot(cArray)
-                #line.set_ydata(cArray)
+                self._updatePlot(row+"_coefs", None, cArray)
                 
                 acc, vel, disp = self._integrate(t, data[row], preWindow)
                 if t.shape[-1] > acc.shape[-1]:
                     t = t[:-1]
+                elif t.shape[-1] < acc.shape[-1]:
+                    t = numpy.append(t, t[-1]+trAcc.stats.delta)
                 
-                # Acceleration
-                ax,line = self.axes[row+"_acc"]
-                ax.plot(t, acc)
-                #line.set_xdata(t)
-                #line.set_ydata(acc)
+                self._updatePlot(row+"_acc", t, acc)
+                self._updatePlot(row+"_vel", t, vel)
+                self._updatePlot(row+"_disp", t, disp)
 
-                # Velocity
-                ax,line = self.axes[row+"_vel"]
-                ax.plot(t, vel)
-                #line.set_xdata(t)
-                #line.set_ydata(vel)
-
-                # Displacement
-                ax,line = self.axes[row+"_disp"]
-                ax.plot(t, disp)
-                #line.set_xdata(t)
-                #line.set_ydata(disp)
-
-            #self.figure.figure.canvas.flush_events()
-            #self.figure.figure.canvas.draw() # TEMPORARY
             plotsDir = os.path.join(_data_filename(self.params, "plots"))
             if not os.path.isdir(plotsDir):
                 os.makedirs(plotsDir)
             self.figure.figure.savefig(os.path.join(plotsDir, info+".png"))
-            #self.figure.figure.clear()
 
             if self.showProgress:
-                sys.stdout.write("\r%d%%" % (((itr+1)*100)/numTraces))
+                sys.stdout.write("\rPlotting noise figures...%d%%" % (((itr+1)*100)/numTraces))
                 sys.stdout.flush()
         if self.showProgress:
             sys.stdout.write("\n")
@@ -530,6 +524,12 @@ class NoiseFigure(object):
             "vel": "Velocity (m/s)",
             "disp": "Displacement (m)",
         }
+        XLABELS = {
+            "coefs": "",
+            "acc": "Time (s)",
+            "vel": "Time (s)",
+            "disp": "Time (s)",
+        }
         nrows = len(NoiseFigure.ROWS)
         ncols = len(NoiseFigure.COLS)
         
@@ -537,12 +537,31 @@ class NoiseFigure(object):
         for irow,row in enumerate(NoiseFigure.ROWS):
             for icol,col in enumerate(NoiseFigure.COLS):
                 ax = self.figure.axes(nrows, ncols, irow+1, icol+1)
+                line, = ax.plot([], [], 'r-', lw=0.5)
+                ax.autoscale(enable=True, axis="both", tight=True)
                 if irow == 0:
                     ax.set_title(TITLES[col])
-                #line, = ax.plot([0], [0], '-')
-                line = None
+                if irow == nrows-1:
+                    ax.set_xlabel(XLABELS[col])
+                if icol == 0:
+                    pos = ax.get_position()
+                    ax.text(pos.xmin, pos.ymax+0.02, row, fontweight='bold', transform=self.figure.figure.transFigure, ha="right")
+                    ax.set_xticks([])
                 self.axes["%s_%s" % (row,col)] = (ax,line)
+                
 
+        return
+
+    def _updatePlot(self, axiskey, x, y):
+        ax, line = self.axes[axiskey]
+        if x is not None:
+            line.set_xdata(x)
+        else:
+            line.set_xdata(numpy.linspace(start=0,stop=y.shape[-1],num=y.shape[-1]))
+        line.set_ydata(y)
+        ax.relim()
+        ax.autoscale_view()
+        ax.draw_artist(line)
         return
     
     def _integrate(self, t, acc, preevent_window=10.0):
