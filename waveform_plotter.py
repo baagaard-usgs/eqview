@@ -11,6 +11,7 @@
 import os
 import logging
 import numpy
+import scipy.integrate
 
 from obspy.clients.fdsn import Client
 
@@ -485,11 +486,11 @@ class NoiseFigure(object):
                 "Signal": trAcc.data,
                 "Noise": trAcc.dataNoise,
             }
-            t = trAcc.times()+(trAcc.stats.starttime-originTime)
+            t = trAcc.times(reftime=originTime)
 
             for row in NoiseFigure.ROWS:
                 # Coefficients
-                coefs = pywt.wavedec(data[row], self.params.get("processing", "wavelet"))
+                coefs = pywt.wavedec(data[row], self.params.get("processing", "wavelet"), mode="constant")
                 cArray,cSlices = pywt.coeffs_to_array(coefs)
                 self._updatePlot(row+"_coefs", None, cArray)
                 
@@ -569,19 +570,18 @@ class NoiseFigure(object):
     def _integrate(self, t, acc, preevent_window=10.0):
         """
         """
+        
         dt = t[1]-t[0]
         numPreWindow = 1+int(preevent_window/dt)
 
-        poly = numpy.polyfit(t[:numPreWindow], numpy.cumsum(acc[:numPreWindow])*dt, 1)
+        poly = numpy.polyfit(t[:numPreWindow], scipy.integrate.cumtrapz(acc[:numPreWindow])*dt, 1)
         acc -= int(poly[0])
 
-        vel = numpy.cumsum(acc)*dt
-        poly = numpy.polyfit(t[:numPreWindow], numpy.cumsum(vel[:numPreWindow])*dt, 1)
-        vel -= poly[0]
+        vel = scipy.integrate.cumtrapz(acc, t, initial=-poly[0])
+        poly = numpy.polyfit(t[:numPreWindow], scipy.integrate.cumtrapz(vel[:numPreWindow])*dt, 1)
         
-        disp = numpy.cumsum(vel)*dt
+        disp = scipy.integrate.cumtrapz(vel, t, initial=-poly[0])
         poly = numpy.polyfit(t[:numPreWindow], numpy.cumsum(disp[:numPreWindow])*dt, 1)
-        disp -= poly[0]
         
         return acc, vel, disp
     
