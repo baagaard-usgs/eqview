@@ -471,12 +471,13 @@ class NoiseFigure(object):
 
         smAcc = data.acc.select(channel="HN?")
         originTime = data._select_hypocenter().time
-        
+
         preWindow = self.params.getfloat("waveforms", "window_preevent")
         numTraces = len(smAcc)
         for itr,trAcc in enumerate(smAcc):
 
-            info = "%s.%s.%s" % (trAcc.stats.network, trAcc.stats.station, trAcc.stats.channel)
+            
+            info = "%s.%s.%s\nS/N %.1f" % (trAcc.stats.network, trAcc.stats.station, trAcc.stats.channel, trAcc.StoN,)
             self.figure.figure.suptitle(info, fontweight='bold')
 
             data = {
@@ -505,7 +506,8 @@ class NoiseFigure(object):
             plotsDir = os.path.join(_data_filename(self.params, "plots"))
             if not os.path.isdir(plotsDir):
                 os.makedirs(plotsDir)
-            self.figure.figure.savefig(os.path.join(plotsDir, info+".png"))
+            filename = "%s.%s.%s.png" % (trAcc.stats.network, trAcc.stats.station, trAcc.stats.channel,)
+            self.figure.figure.savefig(os.path.join(plotsDir, filename))
 
             if self.showProgress:
                 sys.stdout.write("\rPlotting noise figures...%d%%" % (((itr+1)*100)/numTraces))
