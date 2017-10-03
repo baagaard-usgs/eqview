@@ -11,7 +11,6 @@
 import os
 import logging
 import numpy
-import scipy.integrate
 
 from obspy.clients.fdsn import Client
 
@@ -47,6 +46,7 @@ window_total = 70.0
 remove_bg = True
 preevent_threshold_reduction = 2.0
 store_noise = False
+store_orig = False
 wavelet = coif4
 
 [map]
@@ -138,8 +138,9 @@ class WaveformData(object):
         self.event = None
         self.inventory = {}
         self.stream = None
-        self.acc = None
-        self.vel = None
+
+        self.accSM = None
+        self.velBB = None
         return
 
     def fetch_event(self):
@@ -271,6 +272,7 @@ class WaveformData(object):
         import obspyutils.rotate
         import obspyutils.metadata
         import obspyutils.noise
+        import obspyutils.baseline
         import pyproj
         import cPickle
         import math
@@ -298,36 +300,40 @@ class WaveformData(object):
         obspyutils.metadata.addAzimuthDist(stream, epicenter=(hypocenter.longitude, hypocenter.latitude), projection=proj)
 
         # Strong-motion acceleration traces
-        smAcc = stream.select(channel="HN?")
-        smAcc.remove_response(output="ACC")
+        sSM = stream.select(channel="HN?")
+        sSM.remove_response(output="ACC")
         # Remove noise and perform baseline correction
+        wavelet = self.params.get("processing", "wavelet")
         removeBg = self.params.getboolean("processing", "remove_bg")
         preWindow = self.params.getfloat("waveforms", "window_preevent")
         preThreshold = self.params.getfloat("processing", "preevent_threshold_reduction")
         storeNoise = self.params.getboolean("processing", "store_noise")
-        wavelet = self.params.get("processing", "wavelet")
-        obspyutils.noise.denoise(smAcc, removeBg, preWindow, preThreshold, storeNoise, wavelet)
+        storeOrig = self.params.getboolean("processing", "store_orig")
+        accSM = obspyutils.noise.denoise(sSM, wavelet, removeBg, preWindow, preThreshold, storeOrig, storeNoise)
+        
         # :TODO: add baseline correction
-        smVel = smAcc.copy().integrate()
-
+        obspyutils.baseline.correction_constant(accSM["data"])
+        if "orig" in accSM:
+            obspyutils.baseline.correction_constant(accSM["orig"])
+        
         # Broadband velocity traces
-        bbVel = stream.select(channel="HH?")
-        bbVel += stream.select(channel="EH?")
-        bbVel.remove_response(output="VEL")
-        bbAcc = bbVel.copy().differentiate()
-
-        # Combine strong-motion and broadband streams
-        self.acc = smAcc + bbAcc
-        self.vel = smVel + bbVel
+        sVel = stream.select(channel="HH?")
+        sVel += stream.select(channel="EH?")
+        sVel.remove_response(output="VEL")
+        velBB = obspyutils.noise.denoise(sVel, wavelet, removeBg, preWindow, preThreshold, storeOrig, storeNoise)
         
         # Rotate
-        for s in [self.acc, self.vel]:
+        for s in accSM.values() + velBB.values():
             s = obspyutils.rotate.toENZ(inventory, s)
 
+        self.accSM = accSM
         with open(_data_filename(self.params, "waveforms_acc"), "w") as fout:
-            cPickle.Pickler(fout, protocol=-1).dump(self.acc)
+            cPickle.Pickler(fout, protocol=-1).dump(accSM)
+
+        self.velBB = velBB
         with open(_data_filename(self.params, "waveforms_vel"), "w") as fout:
-            cPickle.Pickler(fout, protocol=-1).dump(self.vel)
+            cPickle.Pickler(fout, protocol=-1).dump(velBB)
+            
         return
 
     def load_processed_waveforms(self):
@@ -337,12 +343,13 @@ class WaveformData(object):
         if self.showProgress:
             print("Loading processed waveforms...")            
 
-        if self.acc is None:
+        if self.accSM is None:
             with open(_data_filename(self.params, "waveforms_acc"), "r") as fin:
-                self.acc = cPickle.Unpickler(fin).load()
-        if self.vel is None:
+                self.accSM = cPickle.Unpickler(fin).load()
+        if self.velBB is None:
             with open(_data_filename(self.params, "waveforms_vel"), "r") as fin:
-                self.vel = cPickle.Unpickler(fin).load()
+                self.velBB = cPickle.Unpickler(fin).load()
+
         return
     
     def _get_event(self):
@@ -370,16 +377,6 @@ class WaveformData(object):
             
     def _get_raw_stream(self):
         """Read raw stream if not already loaded.
-
-        :returns: Waveform data stream
-        """
-        if self.stream is None:
-            import obspy.core.stream
-            self.stream = obspy.core.stream.read(_data_filename(self.params, "waveforms_raw"), format="MSEED")
-        return self.stream
-
-    def _get_processed_stream(self):
-        """Read processed stream if not already loaded.
 
         :returns: Waveform data stream
         """
@@ -455,11 +452,11 @@ class NoiseFigure(object):
         from ast import literal_eval
         import pywt
         import sys
+        import obspyutils.baseline
+        from basemap.Figure import Figure
         
         if self.showProgress:
             sys.stdout.write("Plotting noise figures...")
-
-        from basemap.Figure import Figure
         
         self.figure = Figure()
         w = self.params.getfloat("noise_figure", "width")
@@ -470,36 +467,36 @@ class NoiseFigure(object):
         self._setupSubplots()
         self.figure.figure.canvas.draw()
 
-        smAcc = data.acc.select(channel="HN?")
         originTime = data._select_hypocenter().time
-
         preWindow = self.params.getfloat("waveforms", "window_preevent")
-        numTraces = len(smAcc)
-        for itr,trAcc in enumerate(smAcc):
 
+        numTraces = len(data.accSM["data"]) + len(data.velBB["data"])
+        iTrace = 0
+        for trAcc,trAccOrig,trAccNoise in zip(data.accSM["data"],data.accSM["orig"],data.accSM["noise"]):
+            for trA,trB in ((trAcc,trAccOrig),(trAcc,trAccNoise),):
+                assert(trA.stats.network == trB.stats.network)
+                assert(trA.stats.station == trB.stats.station)
+                assert(trA.stats.channel == trB.stats.channel)
             
             info = "%s.%s.%s\nS/N %.1f" % (trAcc.stats.network, trAcc.stats.station, trAcc.stats.channel, trAcc.StoN,)
             self.figure.figure.suptitle(info, fontweight='bold')
 
             data = {
-                "Original": trAcc.dataOrig,
-                "Signal": trAcc.data,
-                "Noise": trAcc.dataNoise,
+                "Original": trAccOrig,
+                "Signal": trAcc,
+                "Noise": trAccNoise,
             }
-            t = trAcc.times(reftime=originTime)
 
             for row in NoiseFigure.ROWS:
                 # Coefficients
-                coefs = pywt.wavedec(data[row], self.params.get("processing", "wavelet"), mode="constant")
+                coefs = pywt.wavedec(data[row], self.params.get("processing", "wavelet"), mode="symmetric")
                 cArray,cSlices = pywt.coeffs_to_array(coefs)
                 self._updatePlot(row+"_coefs", None, cArray)
-                
-                acc, vel, disp = self._integrate(t, data[row], preWindow)
-                if t.shape[-1] > acc.shape[-1]:
-                    t = t[:-1]
-                elif t.shape[-1] < acc.shape[-1]:
-                    t = numpy.append(t, t[-1]+trAcc.stats.delta)
-                
+
+                acc = data[row]
+
+                t = acc.times(reftime=originTime)
+                vel, disp = obspyutils.baseline.integrate_acc(acc)
                 self._updatePlot(row+"_acc", t, acc)
                 self._updatePlot(row+"_vel", t, vel)
                 self._updatePlot(row+"_disp", t, disp)
@@ -511,8 +508,10 @@ class NoiseFigure(object):
             self.figure.figure.savefig(os.path.join(plotsDir, filename))
 
             if self.showProgress:
-                sys.stdout.write("\rPlotting noise figures...%d%%" % (((itr+1)*100)/numTraces))
+                sys.stdout.write("\rPlotting noise figures...%d%%" % (((iTrace+1)*100)/numTraces))
                 sys.stdout.flush()
+            iTrace += 1
+            
         if self.showProgress:
             sys.stdout.write("\n")
             
@@ -566,25 +565,6 @@ class NoiseFigure(object):
         ax.autoscale_view()
         ax.draw_artist(line)
         return
-    
-    def _integrate(self, t, acc, preevent_window=10.0):
-        """
-        """
-        
-        dt = t[1]-t[0]
-        numPreWindow = 1+int(preevent_window/dt)
-
-        poly = numpy.polyfit(t[:numPreWindow], scipy.integrate.cumtrapz(acc[:numPreWindow])*dt, 1)
-        acc -= int(poly[0])
-
-        vel = scipy.integrate.cumtrapz(acc, t, initial=-poly[0])
-        poly = numpy.polyfit(t[:numPreWindow], scipy.integrate.cumtrapz(vel[:numPreWindow])*dt, 1)
-        
-        disp = scipy.integrate.cumtrapz(vel, t, initial=-poly[0])
-        poly = numpy.polyfit(t[:numPreWindow], numpy.cumsum(disp[:numPreWindow])*dt, 1)
-        
-        return acc, vel, disp
-    
     
 # ----------------------------------------------------------------------
 class WaveformsMap(object):
