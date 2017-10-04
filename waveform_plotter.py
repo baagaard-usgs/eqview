@@ -63,7 +63,7 @@ mechanism_color = ltred
 
 [noise_figure]
 height = 7.5
-width = 10.0
+width = 20.0
 margins = ((0.6, 0.5, 0.2), (0.5, 0.6, 0.7))
 
 
@@ -391,7 +391,7 @@ class WaveformData(object):
         :type station: obspy.core.inventory.station.Station
         :param station: Station information.
         """
-        channels = station.channels
+        channels = ",".join([channel.code for channel in station.channels])
         if self.params.has_option("stations", "channel_required"):
             channels = self.params.get("stations", "channel_required")
             for target in channels.split(","):
@@ -409,7 +409,7 @@ class WaveformData(object):
             for target in self.params.get("stations", "channel_priority").split(","):
                 for channel in station.channels:
                     if channel.code.startswith(target):
-                        channels.append(channel)
+                        channels.append(channel.code)
                 if len(channels) > 0:
                     break
             channels = ",".join(channels)
@@ -481,7 +481,7 @@ class NoiseFigure(object):
             info = "%s.%s.%s\nS/N %.1f" % (trAcc.stats.network, trAcc.stats.station, trAcc.stats.channel, trAcc.StoN,)
             self.figure.figure.suptitle(info, fontweight='bold')
 
-            data = {
+            dataRows = {
                 "Original": trAccOrig,
                 "Signal": trAcc,
                 "Noise": trAccNoise,
@@ -489,11 +489,11 @@ class NoiseFigure(object):
 
             for row in NoiseFigure.ROWS:
                 # Coefficients
-                coefs = pywt.wavedec(data[row], self.params.get("processing", "wavelet"), mode="symmetric")
+                coefs = pywt.wavedec(dataRows[row], self.params.get("processing", "wavelet"), mode="symmetric")
                 cArray,cSlices = pywt.coeffs_to_array(coefs)
                 self._updatePlot(row+"_coefs", None, cArray)
 
-                acc = data[row]
+                acc = dataRows[row]
 
                 t = acc.times(reftime=originTime)
                 vel, disp = obspyutils.baseline.integrate_acc(acc)
@@ -505,6 +505,46 @@ class NoiseFigure(object):
             if not os.path.isdir(plotsDir):
                 os.makedirs(plotsDir)
             filename = "%s.%s.%s.png" % (trAcc.stats.network, trAcc.stats.station, trAcc.stats.channel,)
+            self.figure.figure.savefig(os.path.join(plotsDir, filename))
+
+            if self.showProgress:
+                sys.stdout.write("\rPlotting noise figures...%d%%" % (((iTrace+1)*100)/numTraces))
+                sys.stdout.flush()
+            iTrace += 1
+            
+        for trVel,trVelOrig,trVelNoise in zip(data.velBB["data"],data.velBB["orig"],data.velBB["noise"]):
+            for trA,trB in ((trVel,trVelOrig),(trVel,trVelNoise),):
+                assert(trA.stats.network == trB.stats.network)
+                assert(trA.stats.station == trB.stats.station)
+                assert(trA.stats.channel == trB.stats.channel)
+            
+            info = "%s.%s.%s\nS/N %.1f" % (trVel.stats.network, trVel.stats.station, trVel.stats.channel, trVel.StoN,)
+            self.figure.figure.suptitle(info, fontweight='bold')
+
+            dataRows = {
+                "Original": trVelOrig,
+                "Signal": trVel,
+                "Noise": trVelNoise,
+            }
+
+            for row in NoiseFigure.ROWS:
+                # Coefficients
+                coefs = pywt.wavedec(dataRows[row], self.params.get("processing", "wavelet"), mode="symmetric")
+                cArray,cSlices = pywt.coeffs_to_array(coefs)
+                self._updatePlot(row+"_coefs", None, cArray)
+
+                vel = dataRows[row]
+
+                t = vel.times(reftime=originTime)
+                disp,dispI = obspyutils.baseline.integrate_acc(vel)
+                self._updatePlot(row+"_acc", [], [])
+                self._updatePlot(row+"_vel", t, vel)
+                self._updatePlot(row+"_disp", t, disp)
+
+            plotsDir = os.path.join(_data_filename(self.params, "plots"))
+            if not os.path.isdir(plotsDir):
+                os.makedirs(plotsDir)
+            filename = "%s.%s.%s.png" % (trVel.stats.network, trVel.stats.station, trVel.stats.channel,)
             self.figure.figure.savefig(os.path.join(plotsDir, filename))
 
             if self.showProgress:
