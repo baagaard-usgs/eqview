@@ -42,12 +42,19 @@ location = *
 window_preevent = 10.0
 window_total = 70.0
 
-[processing]
+[processing.noise]
 remove_bg = True
+zero_coarse_levels = 0
 preevent_threshold_reduction = 2.0
 store_noise = False
 store_orig = False
 wavelet = coif4
+
+[processing.filter]
+zero_phase = True
+num_corners = 2
+freq_min = 0.2
+freq_max = 25.0
 
 [map]
 width_pixels = 4096
@@ -303,24 +310,33 @@ class WaveformData(object):
         sSM = stream.select(channel="HN?")
         sSM.remove_response(output="ACC")
         # Remove noise and perform baseline correction
-        wavelet = self.params.get("processing", "wavelet")
-        removeBg = self.params.getboolean("processing", "remove_bg")
+        wavelet = self.params.get("processing.noise", "wavelet")
+        removeBg = self.params.getboolean("processing.noise", "remove_bg")
         preWindow = self.params.getfloat("waveforms", "window_preevent")
-        preThreshold = self.params.getfloat("processing", "preevent_threshold_reduction")
-        storeNoise = self.params.getboolean("processing", "store_noise")
-        storeOrig = self.params.getboolean("processing", "store_orig")
-        accSM = obspyutils.noise.denoise(sSM, wavelet, removeBg, preWindow, preThreshold, storeOrig, storeNoise)
+        preThreshold = self.params.getfloat("processing.noise", "preevent_threshold_reduction")
+        zeroCoarse = self.params.getint("processing.noise", "zero_coarse_levels")
+        storeNoise = self.params.getboolean("processing.noise", "store_noise")
+        storeOrig = self.params.getboolean("processing.noise", "store_orig")
+        accSM = obspyutils.noise.denoise(sSM, wavelet, removeBg, zeroCoarse, preWindow, preThreshold, storeOrig, storeNoise)
+
+        freqMin = self.params.getfloat("processing.filter", "freq_min")
+        freqMax = self.params.getfloat("processing.filter", "freq_max")
+        numCorners = self.params.getint("processing.filter", "num_corners")
+        zeroPhase = self.params.getboolean("processing.filter", "zero_phase")
+        accSM["bandpass"] = accSM["orig"].copy()
+        accSM["bandpass"].filter("bandpass", freqmin=freqMin, freqmax=freqMax, corners=numCorners, zerophase=zeroPhase)
         
-        # :TODO: add baseline correction
         obspyutils.baseline.correction_constant(accSM["data"])
         if "orig" in accSM:
             obspyutils.baseline.correction_constant(accSM["orig"])
+        if "bandpass" in accSM:
+            obspyutils.baseline.correction_constant(accSM["bandpass"])
         
         # Broadband velocity traces
         sVel = stream.select(channel="HH?")
         sVel += stream.select(channel="EH?")
         sVel.remove_response(output="VEL")
-        velBB = obspyutils.noise.denoise(sVel, wavelet, removeBg, preWindow, preThreshold, storeOrig, storeNoise)
+        velBB = obspyutils.noise.denoise(sVel, wavelet, removeBg, zeroCoarse, preWindow, preThreshold, storeOrig, storeNoise)
         
         # Rotate
         for s in accSM.values() + velBB.values():
@@ -489,7 +505,7 @@ class NoiseFigure(object):
 
             for row in NoiseFigure.ROWS:
                 # Coefficients
-                coefs = pywt.wavedec(dataRows[row], self.params.get("processing", "wavelet"), mode="symmetric")
+                coefs = pywt.wavedec(dataRows[row], self.params.get("processing.noise", "wavelet"), mode="zero")
                 cArray,cSlices = pywt.coeffs_to_array(coefs)
                 self._updatePlot(row+"_coefs", None, cArray)
 
@@ -529,7 +545,7 @@ class NoiseFigure(object):
 
             for row in NoiseFigure.ROWS:
                 # Coefficients
-                coefs = pywt.wavedec(dataRows[row], self.params.get("processing", "wavelet"), mode="symmetric")
+                coefs = pywt.wavedec(dataRows[row], self.params.get("processing.noise", "wavelet"), mode="zero")
                 cArray,cSlices = pywt.coeffs_to_array(coefs)
                 self._updatePlot(row+"_coefs", None, cArray)
 
