@@ -44,7 +44,7 @@ window_total = 70.0
 
 [processing.noise]
 remove_bg = True
-zero_coarse_levels = 0
+zero_coarse_levels = 1
 preevent_threshold_reduction = 2.0
 store_noise = False
 store_orig = False
@@ -57,15 +57,15 @@ freq_min = 0.2
 freq_max = 25.0
 
 [map]
-width_pixels = 4096
+base_image = ESRI_streetmap
+width_pixels = 7282
 height_pixels = 4096
-zoom_level = 11,
-haxis_size = 0.05,
-vaxis_size = 0.02,
-time_window = 60.0,
-show_axes = True,
-show_labels = True,
-mechanism_size = 100
+zoom_level = 9
+haxis_size = 0.05
+vaxis_size = 0.02
+show_axes = True
+show_labels = True
+mechanism_size = 10
 mechanism_color = ltred
 
 [noise_figure]
@@ -75,10 +75,10 @@ margins = ((0.6, 0.5, 0.2), (0.5, 0.6, 0.7))
 
 
 [record_section]
-width = 7.5,
-height = 10.0
-time_window = 30.0
-acc_per_km = 1.0
+width_in = 15.0
+height_in = 20.0
+time_window = 60.0
+acc_per_km = 0.3
 vel_per_km = 0.025
 show_labels = True
 
@@ -89,7 +89,7 @@ waveforms_raw = waveforms_raw.mseed
 waveforms_acc = waveforms_acc.p
 waveforms_vel = waveforms_vel.p
 plots = plots
-maptiles = ~/scratch/images/tiles
+maptiles = ~/data_scratch/images/tiles
 """
 
 # ----------------------------------------------------------------------
@@ -368,6 +368,44 @@ class WaveformData(object):
 
         return
     
+    def load_event(self):
+        """Load event.
+        """
+        if self.showProgress:
+            print("Loading event...")            
+
+        self.event = self._get_event()
+        self.hypocenter = self._select_hypocenter()
+        return
+
+    def load_stations(self):
+        """Load stations. Use raw waveforms to get station locations if
+        available, otherwise use list of stations.
+        """
+        import obspyutils.metadata
+        
+        if self.showProgress:
+            print("Loading stations...")            
+
+        inventory = None
+        for dc in _config_get_list(self.params.get("fdsn.client", "data_centers")):
+            inventoryDC = self._get_inventory(dc)
+            if inventory is None:
+                inventory = inventoryDC
+            else:
+                inventory += inventoryDC
+            
+        if os.path.isfile(_data_filename(self.params, "waveforms_raw")):
+            stream = self._get_raw_stream()
+            self.stationsSM = stream.select(channel="HN?")
+            self.stationsBB = stream.select(channel="HH?")
+            obspyutils.metadata.addLocation(inventory, self.stationsSM)
+            obspyutils.metadata.addLocation(inventory, self.stationsBB)
+        else:
+            self.stationsSM = inventory.select(channel="HN?")
+            self.stationsBB = inventory.select(channel="HH?")
+        return
+    
     def _get_event(self):
         """Read event if not already loaded.
 
@@ -635,13 +673,14 @@ class WaveformsMap(object):
     def plot(self):
         import basemap.Tiler
         import basemap.WaveformsMap
+        import sys
 
         paramsMap = self.params["map"]
         plotW = paramsMap["width_pixels"]
         plotH = paramsMap["height_pixels"]
 
-        hypocenter = self._select_hypocenter()
         event = self._get_event()
+        hypocenter = self._select_hypocenter()
 
         center = (hypocenter.longitude, hypocenter.latitude)
         domainH = 150.0 #2.5*self.params["stations"]["maxradius"]
@@ -697,52 +736,107 @@ class WaveformsMap(object):
                 map.figure.savefig("waveformsmap_%s_%s.png" % (field, component))
     
 # ----------------------------------------------------------------------
+class StationsMap(object):
+    """
+    """
+
+    def __init__(self, params, showProgress):
+        self.params = params
+        self.showProgress = showProgress
+        return
+    
+    
+    def plot(self, data):
+        from basemap.Tiler import Tiler
+        from basemap.WaveformsMap import WaveformsMap
+        import sys
+
+        if self.showProgress:
+            sys.stdout.write("Plotting station map...")
+
+        hypocenter = data.hypocenter
+            
+        plotW = self.params.getfloat("map", "width_pixels")
+        plotH = self.params.getfloat("map", "height_pixels")
+        center = (hypocenter.longitude, hypocenter.latitude)
+        domainH = 2.0*110.0*self.params.getfloat("fdsn.station", "maxradius")
+        zoomLevel = self.params.getint("map", "zoom_level")
+        baseImage = self.params.get("map", "base_image")
+        
+        tiler = Tiler(center=center, width=plotW/float(plotH)*domainH, height=domainH, level=zoomLevel, base=baseImage)
+        tiler.initialize()
+        tiler.tile("basemap.png", cacheDir=os.path.expanduser(self.params.get("files", "maptiles")))
+
+        map = WaveformsMap(tiler, color="lightbg", fontsize=8)
+        map.open(plotW, plotH, "basemap.png")
+
+        map.plotEpicenter((hypocenter.longitude, hypocenter.latitude), size=self.params.getfloat("map", "mechanism_size"))
+        map.plotStations(data.stationsSM, color="c_blue", marker="^", showLabels=True)
+        map.plotStations(data.stationsBB, color="c_ltgreen", marker="v", showLabels=True)
+
+        plotsDir = os.path.expanduser(os.path.join(_data_filename(self.params, "plots")))
+        if not os.path.isdir(plotsDir):
+            os.makedirs(plotsDir)
+        map.figure.savefig(os.path.join(plotsDir, "stations_map.png"))
+        return
+        
+# ----------------------------------------------------------------------
 class RecordSection(object):
     """
     """
 
-    def __init__(self, data):
-        self.data = data
+    def __init__(self, params, showProgress):
+        self.params = params
+        self.showProgress = showProgress
         return
     
     
-    def plot(self):
+    def plot(self, data):
+        from ast import literal_eval
         from basemap.Figure import Figure
 
-        paramsRecSec = self.params["record_section"]
+        hypocenter = data.hypocenter
 
-        hypocenter = self._select_hypocenter()
+        # Acceleration
+        field = "acc"
+        stream = data.accSM["data"]
+        tlength = self.params.getfloat("record_section", "time_window")
+        starttime = hypocenter.time
+        endtime = starttime + tlength
+        stream.trim(starttime, endtime, pad=True)
+        stream.rotate("NE->RT")
 
-        for field in ["acc","vel"]:
-            stream = obspyutils.pickle.unpickle(self.params["waveforms"]["%s" % field])
-            stream.rotate("NE->RT")
+        plotsDir = os.path.expanduser(os.path.join(_data_filename(self.params, "plots")))
+        if not os.path.isdir(plotsDir):
+            os.makedirs(plotsDir)
 
-            starttime = hypocenter.time
-            endtime = starttime + paramsRecSec["time_window"]
-            stream.trim(starttime, endtime, pad=True)
+        for component in ["R","T","Z"]:
+            streamC = stream.select(component=component)
 
-            for component in ["R","T","Z"]:
-                streamC = stream.select(component=component)
-
-                fig = Figure(color="lightbg", fontsize=10)
-                fig.open(width=paramsRecSec["width"], height=paramsRecSec["height"], margins=((0.5, 0, 0.1), (0.5, 0, 0.1)))
-                ax = fig.axes(1, 1, 1, 1)
+            fig = Figure(color="lightbg", fontsize=10)
+            plotW = self.params.getfloat("record_section", "width_in")
+            plotH = self.params.getfloat("record_section", "height_in")
+            margins = literal_eval(self.params.get("noise_figure", "margins"))
+            fig.open(plotW, plotH, margins)
+            ax = fig.axes(1, 1, 1, 1)
                 
-                vscale = paramsRecSec["%s_per_km" % field]
+            vscale = self.params.getfloat("record_section", "%s_per_km" % field)
 
-                for trace in streamC.traces:
-                    distKm = trace.stats.distance / 1.0e+3
-                    if numpy.max(numpy.abs(trace.data/vscale)) < 5.0:
-                        ax.plot(trace.times(), distKm+trace.data/vscale, linewidth=0.5, color="blue")
+            for trace in streamC.traces:
+                distKm = trace.stats.distance / 1.0e+3
+                t = trace.times(reftime=hypocenter.time)
+                ax.plot(t, distKm*(1.0 + trace.data/vscale), linewidth=0.5, color="c_blue")
+                if self.params.get("record_section", "show_labels"):
+                    label = "%s.%s" % (trace.stats.network, trace.stats.station)
+                    ax.text(numpy.min(t), distKm, label, horizontalalignment="left", verticalalignment="bottom", fontsize=6, color="c_orange")
+            ax.set_xlabel("Time (s)")
+            ax.set_ylabel("Epicentral Distance (km)")
+            ax.set_xlim(0.0, tlength)
+            fig.figure.savefig(os.path.join(plotsDir, "recordsection_%s_%s.pdf" % (field, component)))
+        
 
-                        if paramsRecSec["show_labels"]:
-                            label = "%s.%s" % (trace.stats.network, trace.stats.station)
-                            ax.text(numpy.min(trace.times()), distKm, label, horizontalalignment="left", verticalalignment="bottom", fontsize=6, color="orange")
-
-                ax.set_xlabel("Time (s)")
-                ax.set_ylabel("Epicentral Distance (km)")
-                ax.set_xlim(0.0, paramsRecSec["time_window"])
-                fig.figure.savefig("recordsection_%s_%s.pdf" % (field, component))
+        # Velocity
+        return
     
 
 # ----------------------------------------------------------------------
@@ -810,7 +904,8 @@ if __name__ == "__main__":
     parser.add_argument("--process-waveforms", action="store_true", dest="process_waveforms")
     parser.add_argument("--plot-section", action="store_true", dest="plot_section")
     parser.add_argument("--plot-noise", action="store_true", dest="plot_noise")
-    parser.add_argument("--plot-map", action="store_true", dest="plot_map")
+    parser.add_argument("--plot-waveforms-map", action="store_true", dest="plot_waveforms_map")
+    parser.add_argument("--plot-stations-map", action="store_true", dest="plot_stations_map")
     parser.add_argument("--all", action="store_true", dest="all")
     parser.add_argument("--quiet", action="store_false", dest="show_progress", default=True)
     parser.add_argument("--debug", action="store_true", dest="debug")
@@ -845,18 +940,25 @@ if __name__ == "__main__":
     if args.process_waveforms or args.all:
         data.process_waveforms()
 
+    if args.plot_stations_map or args.all:
+        plotter = StationsMap(app.params, args.show_progress)
+        data.load_event()
+        data.load_stations()
+        plotter.plot(data)
+    
     if args.plot_noise or args.all:
         plotter = NoiseFigure(app.params, args.show_progress)
         data.load_processed_waveforms()
         plotter.plot(data)
         
-    if args.plot_map or args.all:
+    if args.plot_waveforms_map or args.all:
         plotter = WaveformsMap(app.params, args.show_progress)
         data.load_processed_waveforms()
         plotter.plot(data)
     
     if args.plot_section or args.all:
         plotter = RecordSection(app.params, args.show_progress)
+        data.load_event()
         data.load_processed_waveforms()
         plotter.plot(data)
     
