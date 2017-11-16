@@ -323,8 +323,9 @@ class WaveformData(object):
         freqMax = self.params.getfloat("processing.filter", "freq_max")
         numCorners = self.params.getint("processing.filter", "num_corners")
         zeroPhase = self.params.getboolean("processing.filter", "zero_phase")
-        accSM["bandpass"] = accSM["orig"].copy()
-        accSM["bandpass"].filter("bandpass", freqmin=freqMin, freqmax=freqMax, corners=numCorners, zerophase=zeroPhase)
+        if "orig" in accSM:
+            accSM["bandpass"] = accSM["orig"].copy()
+            accSM["bandpass"].filter("bandpass", freqmin=freqMin, freqmax=freqMax, corners=numCorners, zerophase=zeroPhase)
         
         obspyutils.baseline.correction_constant(accSM["data"])
         if "orig" in accSM:
@@ -665,65 +666,64 @@ class WaveformsMap(object):
     """
     """
 
-    def __init__(self, data):
-        self.data = data
+    def __init__(self, params, showProgress):
+        self.params = params
+        self.showProgress = showProgress
         return
     
     
-    def plot(self):
-        import basemap.Tiler
-        import basemap.WaveformsMap
+    def plot(self, data):
+        from basemap.Tiler import Tiler
+        from basemap.WaveformsMap import WaveformsMap
         import sys
 
-        paramsMap = self.params["map"]
-        plotW = paramsMap["width_pixels"]
-        plotH = paramsMap["height_pixels"]
+        if self.showProgress:
+            sys.stdout.write("Plotting station map...")
 
-        event = self._get_event()
-        hypocenter = self._select_hypocenter()
-
+        hypocenter = data.hypocenter
+            
+        plotW = self.params.getfloat("map", "width_pixels")
+        plotH = self.params.getfloat("map", "height_pixels")
         center = (hypocenter.longitude, hypocenter.latitude)
-        domainH = 150.0 #2.5*self.params["stations"]["maxradius"]
-
-        tiler = Tiler(center=center, width=plotW/float(plotH)*domainH, height=domainH, level=paramsMap["zoom_level"], base="ESRI_streetmap")
+        domainH = 2.5*110.0*self.params.getfloat("fdsn.station", "maxradius")
+        zoomLevel = self.params.getint("map", "zoom_level")
+        baseImage = self.params.get("map", "base_image")
+        
+        tiler = Tiler(center=center, width=plotW/float(plotH)*domainH, height=domainH, level=zoomLevel, base=baseImage)
         tiler.initialize()
-        tiler.tile("basemap.png")
+        tiler.tile("basemap.png", cacheDir=os.path.expanduser(self.params.get("files", "maptiles")))
 
-        freqMin = self.params["waveforms"]["freq_min"]
-        freqMax = self.params["waveforms"]["freq_max"]
+        plotsDir = os.path.expanduser(os.path.join(_data_filename(self.params, "plots")))
+        if not os.path.isdir(plotsDir):
+            os.makedirs(plotsDir)
+
+        # Integrate accSM to velocity
+        # Differentiate velBB to acceleration
+    
         for field in ["acc","vel"]:
-            stream = obspyutils.pickle.unpickle(self.params["waveforms"]["%s" % field])
-            stream.rotate("NE->RT")
-            if freqMax:
-                if freqMin:
-                    stream.filter("bandpass", freqmin=freqMin, freqmax=freqMax, corners=2, zerophase=True)
-                else:
-                    stream.filter("lowpass", freq=freqMax, corners=2, zerophase=True)
-
-            elif freqMin:
-                stream.filter("highpass", freq=freqMin, corners=2, zerophase=True)
-
             starttime = hypocenter.time
-            endtime = starttime + paramsMap["time_window"]
+            endtime = starttime + paramsMap["time_window"] # FIX THIS
             stream.trim(starttime, endtime, pad=True)
 
             for component in ["R","T","Z"]:
-                streamC = stream.select(component=component)
+                streamC = stream.select(component=component) # FIX THIS
 
                 map = WaveformsMap(tiler, color="lightbg", fontsize=8)
                 map.open(plotW, plotH, "basemap.png")
 
-                from obspy.imaging.beachball import beach
-                import obspyutils.event
-                fm = obspyutils.event.first_motion(event)
-                mechanism = (fm.nodal_planes.nodal_plane_1.strike.real,
-                             fm.nodal_planes.nodal_plane_1.dip.real,
-                             fm.nodal_planes.nodal_plane_1.rake.real)
-                xy = tiler.geoToImage(numpy.array([[hypocenter.longitude, hypocenter.latitude]]))
-                beachball = beach(mechanism, xy=xy[0], width=paramsMap["mechanism_size"], facecolor=paramsMap["mechanism_color"], axes=map.ax)
-                map.ax.add_collection(beachball)
- 
-                map.plotStations(stream, showLabel=paramsMap["show_labels"])
+                #from obspy.imaging.beachball import beach
+                #import obspyutils.event
+                #fm = obspyutils.event.first_motion(event)
+                #mechanism = (fm.nodal_planes.nodal_plane_1.strike.real,
+                #             fm.nodal_planes.nodal_plane_1.dip.real,
+                #             fm.nodal_planes.nodal_plane_1.rake.real)
+                #xy = tiler.geoToImage(numpy.array([[hypocenter.longitude, hypocenter.latitude]]))
+                #beachball = beach(mechanism, xy=xy[0], width=paramsMap["mechanism_size"], facecolor=paramsMap["mechanism_color"], axes=map.ax)
+                #map.ax.add_collection(beachball)
+                map.plotEpicenter((hypocenter.longitude, hypocenter.latitude), size=self.params.getfloat("map", "mechanism_size"))
+                map.plotStations(data.stationsSM, color="c_blue", marker="^", showLabels=True)
+                map.plotStations(data.stationsBB, color="c_ltgreen", marker="v", showLabels=True)
+
                 maxamp = streamC.max()
                 if field == "acc":
                     maxlim = numpy.max(maxamp[maxamp < 2000.0])
@@ -731,9 +731,9 @@ class WaveformsMap(object):
                 else:
                     maxlim = numpy.max(maxamp[maxamp < 2.0])
                     ylabel = "Velocity (m/s)"
-                map.plotWaveforms(streamC, width=paramsMap["haxis_size"], height=paramsMap["vaxis_size"], showFirstAxes=True, ylim=[-maxlim,maxlim], label=ylabel)
+                map.plotWaveforms(streamC, width=haxisSize, height=vaxisSize, showFirstAxes=True, ylim=[-maxlim,maxlim], label=ylabel)
 
-                map.figure.savefig("waveformsmap_%s_%s.png" % (field, component))
+                map.figure.savefig(os.path.join(plotsDir, "waveformsmap_%s_%s.png" % (field, component,)))
     
 # ----------------------------------------------------------------------
 class StationsMap(object):
@@ -759,7 +759,7 @@ class StationsMap(object):
         plotW = self.params.getfloat("map", "width_pixels")
         plotH = self.params.getfloat("map", "height_pixels")
         center = (hypocenter.longitude, hypocenter.latitude)
-        domainH = 2.0*110.0*self.params.getfloat("fdsn.station", "maxradius")
+        domainH = 2.5*110.0*self.params.getfloat("fdsn.station", "maxradius")
         zoomLevel = self.params.getint("map", "zoom_level")
         baseImage = self.params.get("map", "base_image")
         
@@ -807,6 +807,7 @@ class RecordSection(object):
         stream.rotate("NE->RT")
 
         plotsDir = os.path.expanduser(os.path.join(_data_filename(self.params, "plots")))
+        print plotsDir
         if not os.path.isdir(plotsDir):
             os.makedirs(plotsDir)
 
