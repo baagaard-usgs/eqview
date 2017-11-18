@@ -45,6 +45,7 @@ window_total = 70.0
 [processing.noise]
 remove_bg = True
 zero_coarse_levels = 1
+zero_fine_levels = 1
 preevent_threshold_reduction = 2.0
 store_noise = False
 store_orig = False
@@ -315,9 +316,10 @@ class WaveformData(object):
         preWindow = self.params.getfloat("waveforms", "window_preevent")
         preThreshold = self.params.getfloat("processing.noise", "preevent_threshold_reduction")
         zeroCoarse = self.params.getint("processing.noise", "zero_coarse_levels")
+        zeroFine = self.params.getint("processing.noise", "zero_fine_levels")
         storeNoise = self.params.getboolean("processing.noise", "store_noise")
         storeOrig = self.params.getboolean("processing.noise", "store_orig")
-        accSM = obspyutils.noise.denoise(sSM, wavelet, removeBg, zeroCoarse, preWindow, preThreshold, storeOrig, storeNoise)
+        accSM = obspyutils.noise.denoise(sSM, wavelet, removeBg, zeroCoarse, zeroFine, preWindow, preThreshold, storeOrig, storeNoise)
 
         freqMin = self.params.getfloat("processing.filter", "freq_min")
         freqMax = self.params.getfloat("processing.filter", "freq_max")
@@ -337,7 +339,7 @@ class WaveformData(object):
         sVel = stream.select(channel="HH?")
         sVel += stream.select(channel="EH?")
         sVel.remove_response(output="VEL")
-        velBB = obspyutils.noise.denoise(sVel, wavelet, removeBg, zeroCoarse, preWindow, preThreshold, storeOrig, storeNoise)
+        velBB = obspyutils.noise.denoise(sVel, wavelet, removeBg, zeroCoarse, zeroFine, preWindow, preThreshold, storeOrig, storeNoise)
         
         # Rotate
         for s in accSM.values() + velBB.values():
@@ -566,7 +568,7 @@ class NoiseFigure(object):
                 sys.stdout.write("\rPlotting noise figures...%d%%" % (((iTrace+1)*100)/numTraces))
                 sys.stdout.flush()
             iTrace += 1
-            
+
         for trVel,trVelOrig,trVelNoise in zip(data.velBB["data"],data.velBB["orig"],data.velBB["noise"]):
             for trA,trB in ((trVel,trVelOrig),(trVel,trVelNoise),):
                 assert(trA.stats.network == trB.stats.network)
@@ -807,7 +809,6 @@ class RecordSection(object):
         stream.rotate("NE->RT")
 
         plotsDir = os.path.expanduser(os.path.join(_data_filename(self.params, "plots")))
-        print plotsDir
         if not os.path.isdir(plotsDir):
             os.makedirs(plotsDir)
 
