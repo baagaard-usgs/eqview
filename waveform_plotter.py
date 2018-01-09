@@ -82,6 +82,9 @@ time_window = 60.0
 acc_per_km = 0.3
 vel_per_km = 0.025
 show_labels = True
+show_wavespeeds = True
+vp_kmps = 5.6
+vs_kmps = 3.4
 
 [files]
 event = event.xml
@@ -825,7 +828,7 @@ class RecordSection(object):
             vscale = self.params.getfloat("record_section", "%s_per_km" % field)
 
             for trace in streamC.traces:
-                distKm = trace.stats.distance / 1.0e+3
+                distKm = 1.0e-3 * (trace.stats.distance**2 + hypocenter.depth**2)**0.5
                 t = trace.times(reftime=hypocenter.time)
                 ax.plot(t, distKm*(1.0 + trace.data/vscale), linewidth=0.5, color="c_blue")
                 if self.params.get("record_section", "show_labels"):
@@ -834,6 +837,17 @@ class RecordSection(object):
             ax.set_xlabel("Time (s)")
             ax.set_ylabel("Epicentral Distance (km)")
             ax.set_xlim(0.0, tlength)
+            ax.autoscale(axis="y", tight=True)
+
+            if self.params.getboolean("record_section", "show_wavespeeds"):
+                vp = self.params.getfloat("record_section", "vp_kmps")
+                vs = self.params.getfloat("record_section", "vs_kmps")
+                ymax = ax.get_ylim()[1]
+                ax.plot([0.0, ymax/vp], [0.0, ymax], color="c_orange", linewidth=2, alpha=0.5)
+                ax.text(ymax/vp, 0.995*ymax, "Vp={:3.1f}km/s".format(vp), color="c_orange", ha="left", va="top")
+                ax.plot([0.0, ymax/vs], [0.0, ymax], color="c_red", linewidth=2, alpha=0.5)
+                ax.text(ymax/vs, 0.995*ymax, "Vs={:3.1f}km/s".format(vs), color="c_red", ha="left", va="top")
+            
             fig.figure.savefig(os.path.join(plotsDir, "recordsection_%s_%s.pdf" % (field, component)))
         
 
