@@ -59,13 +59,15 @@ freq_max = 25.0
 
 [map]
 base_image = ESRI_streetmap
-width_pixels = 7282
-height_pixels = 4096
-zoom_level = 9
+#width_pixels = 7282
+#height_pixels = 4096
+width_pixels = 1280
+height_pixels = 1024
+zoom_level = 8
 haxis_size = 0.05
 vaxis_size = 0.02
 show_axes = True
-show_labels = True
+show_labels = False
 mechanism_size = 10
 mechanism_color = ltred
 
@@ -808,7 +810,7 @@ class RecordSection(object):
         tlength = self.params.getfloat("record_section", "time_window")
         starttime = hypocenter.time
         endtime = starttime + tlength
-        stream.trim(starttime, endtime, pad=True)
+        stream.trim(starttime, endtime, pad=True, fill_value=0.0)
         stream.rotate("NE->RT")
 
         plotsDir = os.path.expanduser(os.path.join(_data_filename(self.params, "plots")))
