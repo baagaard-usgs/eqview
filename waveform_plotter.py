@@ -239,7 +239,11 @@ class WaveformData(object):
         """
         for dc in _config_get_list(self.params.get("fdsn.client", "data_centers")):
             inventory = self._get_inventory(dc)
-            print(inventory)
+            for network in inventory.networks:
+                for station in network:
+                    channels = ",".join(["{}.{}".format(channel.location_code, channel.code) for channel in station.channels])
+                    print("{network.code}.{station.code} {station.site.name} {station.longitude:.4f} {station.latitude:.4f} {channels}".format(
+                        network=network, station=station, channels=channels))
         return
     
     def fetch_waveforms(self):
