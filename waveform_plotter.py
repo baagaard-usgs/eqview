@@ -169,7 +169,7 @@ class WaveformData(object):
         client = Client(dataCenter, debug=self.params.getboolean("fdsn.client", "debug")) # Fetch from first data center
         eventid = self.params.get("waveformsapp", "event")
         kwargs = {
-            "eventid": re.sub(r"\D", "", eventid),
+            "eventid": re.sub(r"\D", "", eventid) if dataCenter == "NCEDC" else eventid,
         }
         kwargs.update(dict(self.params.items("fdsn.event")))
         catalog = client.get_events(**kwargs)
