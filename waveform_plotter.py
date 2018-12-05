@@ -1,12 +1,8 @@
 #!/usr/bin/env python
-#
 # ======================================================================
-#
-#                           Brad T. Aagaard
-#                        U.S. Geological Survey
-#
+# Brad T. Aagaard
+# U.S. Geological Survey
 # ======================================================================
-#
 
 import os
 import logging
@@ -20,7 +16,7 @@ event = nc72282711
 name = South Napa
 
 [fdsn.client]
-data_centers = [NCEDC, IRIS]
+data_centers = [USGS, NCEDC, IRIS]
 debug = False
 
 [fdsn.event]
@@ -57,19 +53,21 @@ num_corners = 2
 freq_min = 0.2
 freq_max = 25.0
 
-[map]
-base_image = ESRI_streetmap
-#width_pixels = 7282
-#height_pixels = 4096
-width_pixels = 1280
-height_pixels = 1024
+[maps]
+tiler = cartopy_extra_tiles.esri_tiles.ESRI
+tiler_style = streetmap
+tiler_cache_dir = ~/data_scratch/images/tiles
+width_in = 15.0
+height_in = 15.0
 zoom_level = 8
+
+[waveforms_map]
 haxis_size = 0.05
 vaxis_size = 0.02
 show_axes = True
 show_labels = False
 mechanism_size = 10
-mechanism_color = ltred
+station_size = 6
 
 [noise_figure]
 height = 7.5
@@ -79,7 +77,9 @@ margins = ((0.6, 0.5, 0.2), (0.5, 0.6, 0.7))
 
 [record_section]
 width_in = 15.0
-height_in = 20.0
+height_in = 15.0
+margins = ((0.8, 0.5, 0.2), (0.5, 0.6, 0.7))
+
 time_window = 60.0
 acc_per_km = 0.3
 vel_per_km = 0.025
@@ -169,7 +169,7 @@ class WaveformData(object):
         client = Client(dataCenter, debug=self.params.getboolean("fdsn.client", "debug")) # Fetch from first data center
         eventid = self.params.get("waveformsapp", "event")
         kwargs = {
-            "eventid": re.sub(r"\D", "", eventid) if dataCenter == "NCEDC" else eventid,
+            "eventid": eventid if dataCenter == "USGS" else re.sub(r"\D", "", eventid),
         }
         kwargs.update(dict(self.params.items("fdsn.event")))
         catalog = client.get_events(**kwargs)
@@ -203,6 +203,9 @@ class WaveformData(object):
 
         self.inventory = {}
         for dc in _config_get_list(self.params.get("fdsn.client", "data_centers")):
+            if dc == "USGS":
+                continue
+            
             client = Client(dc, timeout=300, debug=self.params.getboolean("fdsn.client", "debug"))
             kwargs = {
                 "startbefore": hypocenter.time,
@@ -228,7 +231,7 @@ class WaveformData(object):
                 numStations = 0
                 for network in inventory.networks:
                     numStations += len(network.stations)
-                print("    Retrieved %d total stations across %d networks from data center %s." % (numStations, numNetworks, dc))
+                print("    Retrieved {} total stations across {} networks from data center {}.".format(numStations, numNetworks, dc))
 
             self.inventory[dc] = inventory
         return
@@ -239,6 +242,9 @@ class WaveformData(object):
         """
         for dc in _config_get_list(self.params.get("fdsn.client", "data_centers")):
             inventory = self._get_inventory(dc)
+            if inventory is None:
+                continue
+
             for network in inventory.networks:
                 for station in network:
                     channels = ",".join(["{}.{}".format(channel.location_code, channel.code) for channel in station.channels])
@@ -255,9 +261,13 @@ class WaveformData(object):
         t2 = t1 + self.params.getfloat("waveforms", "window_total")
 
         from math import ceil
-        stream = None
+        from obspy import Stream
+        
+        stream = Stream()
         for dc in _config_get_list(self.params.get("fdsn.client", "data_centers")):
             inventory = self._get_inventory(dc)
+            if inventory is None:
+                continue
 
             client = Client(dc, timeout=1200, debug=self.params.getboolean("fdsn.client", "debug"))
             bulk = []
@@ -270,15 +280,11 @@ class WaveformData(object):
                         bulk.append(info)
             maxSize = 200
             nbatches = int(ceil(len(bulk) / float(maxSize)))
-            print "   Using %d batches to fetch waveforms for %d stations from data center %s..." % (nbatches, len(bulk), dc)
+            print("   Using {} batches to fetch waveforms for {} stations from data center {}...".format(nbatches, len(bulk), dc))
             for i in xrange(nbatches):
                 istart = i*maxSize
                 iend = min((i+1)*maxSize, len(bulk))
-                streamB = client.get_waveforms_bulk(bulk[istart:iend])
-                if stream is None:
-                    stream = streamB
-                else:
-                    stream += streamB
+                stream += client.get_waveforms_bulk(bulk[istart:iend])
             
         stream.write(_data_filename(self.params, "waveforms_raw"), format="MSEED")
         self.stream = stream
@@ -302,6 +308,9 @@ class WaveformData(object):
         inventory = None
         for dc in _config_get_list(self.params.get("fdsn.client", "data_centers")):
             inventoryDC = self._get_inventory(dc)
+            if inventoryDC is None:
+                continue
+            
             if inventory is None:
                 inventory = inventoryDC
             else:
@@ -402,6 +411,9 @@ class WaveformData(object):
         inventory = None
         for dc in _config_get_list(self.params.get("fdsn.client", "data_centers")):
             inventoryDC = self._get_inventory(dc)
+            if inventoryDC is None:
+                continue
+            
             if inventory is None:
                 inventory = inventoryDC
             else:
@@ -436,6 +448,9 @@ class WaveformData(object):
 
         :returns: Inventory object
         """
+        if dataCenter == "USGS":
+            return
+        
         if not dataCenter in self.inventory:
             import obspy.core.inventory
             self.inventory[dataCenter] = obspy.core.inventory.read_inventory(_data_filename(self.params, "stations", dataCenter), format="STATIONXML")
@@ -518,17 +533,19 @@ class NoiseFigure(object):
         from ast import literal_eval
         import pywt
         import sys
+
+        import matplotlib.pyplot as pyplot
+
         import obspyutils.baseline
-        from basemap.Figure import Figure
+        import matplotlib_extras.colors
+        import matplotlib_extras
         
         if self.showProgress:
             sys.stdout.write("Plotting noise figures...")
         
-        self.figure = Figure()
         w = self.params.getfloat("noise_figure", "width")
         h = self.params.getfloat("noise_figure", "height")
-        margins = literal_eval(self.params.get("noise_figure", "margins"))
-        self.figure.open(w, h, margins)
+        self.figure = pyplot.figure(figsize=(w,h))
 
         self._setupSubplots()
         self.figure.figure.canvas.draw()
@@ -640,11 +657,14 @@ class NoiseFigure(object):
         }
         nrows = len(NoiseFigure.ROWS)
         ncols = len(NoiseFigure.COLS)
+
+        margins = literal_eval(self.params.get("noise_figure", "margins"))
+        rectFactory = matplotlib_extras.axes.RectFactory(figure, margins=margins)
         
         self.axes = {}
         for irow,row in enumerate(NoiseFigure.ROWS):
             for icol,col in enumerate(NoiseFigure.COLS):
-                ax = self.figure.axes(nrows, ncols, irow+1, icol+1)
+                ax = pyplot.axes(rectFactory.rect(), nrows=nrows, ncols=ncols, row=irow+1, col=icol+1)
                 line, = ax.plot([], [], 'r-', lw=0.5)
                 ax.autoscale(enable=True, axis="both", tight=True)
                 if irow == 0:
@@ -655,9 +675,7 @@ class NoiseFigure(object):
                     pos = ax.get_position()
                     ax.text(pos.xmin, pos.ymax+0.02, row, fontweight='bold', transform=self.figure.figure.transFigure, ha="right")
                     ax.set_xticks([])
-                self.axes["%s_%s" % (row,col)] = (ax,line)
-                
-
+                self.axes[row+"_"+col] = (ax,line)
         return
 
     def _updatePlot(self, axiskey, x, y):
@@ -684,8 +702,6 @@ class WaveformsMap(object):
     
     
     def plot(self, data):
-        from basemap.Tiler import Tiler
-        from basemap.WaveformsMap import WaveformsMap
         import sys
 
         if self.showProgress:
@@ -750,111 +766,152 @@ class WaveformsMap(object):
 class StationsMap(object):
     """
     """
-
-    def __init__(self, params, showProgress):
-        self.params = params
+    from cartopy import crs
+    wgs84CRS = crs.Geodetic()
+    
+    def __init__(self, config, showProgress):
+        self.config = config
         self.showProgress = showProgress
         return
     
     
     def plot(self, data):
-        from basemap.Tiler import Tiler
-        from basemap.WaveformsMap import WaveformsMap
         import sys
+        from importlib import import_module
 
+        import matplotlib.pyplot as pyplot
+
+        from cartopy_extra_tiles import cached_tiler
+        import matplotlib_extras
+        
         if self.showProgress:
             sys.stdout.write("Plotting station map...")
 
         hypocenter = data.hypocenter
-            
-        plotW = self.params.getfloat("map", "width_pixels")
-        plotH = self.params.getfloat("map", "height_pixels")
-        center = (hypocenter.longitude, hypocenter.latitude)
-        domainH = 2.5*110.0*self.params.getfloat("fdsn.station", "maxradius")
-        zoomLevel = self.params.getint("map", "zoom_level")
-        baseImage = self.params.get("map", "base_image")
-        
-        tiler = Tiler(center=center, width=plotW/float(plotH)*domainH, height=domainH, level=zoomLevel, base=baseImage)
-        tiler.initialize()
-        tiler.tile("basemap.png", cacheDir=os.path.expanduser(self.params.get("files", "maptiles")))
 
-        map = WaveformsMap(tiler, color="lightbg", fontsize=8)
-        map.open(plotW, plotH, "basemap.png")
 
-        map.plotEpicenter((hypocenter.longitude, hypocenter.latitude), size=self.params.getfloat("map", "mechanism_size"))
-        map.plotStations(data.stationsSM, color="c_blue", marker="^", showLabels=True)
-        map.plotStations(data.stationsBB, color="c_ltgreen", marker="v", showLabels=True)
+        tilerPath = self.config.get("maps", "tiler").split(".")
+        tilerObj = getattr(import_module(".".join(tilerPath[:-1])), tilerPath[-1])
+        tilerStyle = self.config.get("maps", "tiler_style")
+        tilerZoom = self.config.getint("maps", "zoom_level")
+        tilesDir = self.config.get("maps", "tiler_cache_dir")
+        tiler = cached_tiler.CachedTiler(tilerObj(desired_tile_form="L", style=tilerStyle), cache_dir=tilesDir)
 
-        plotsDir = os.path.expanduser(os.path.join(_data_filename(self.params, "plots")))
+        figWidthIn = self.config.getfloat("maps", "width_in")
+        figHeightIn = self.config.getfloat("maps", "height_in")
+        figure = pyplot.figure(figsize=(figWidthIn, figHeightIn))
+        matplotlib_extras.colors.add_general()
+
+        rectFactory = matplotlib_extras.axes.RectFactory(figure, margins=((0, 0, 0), (0, 0, 0)))
+        ax = pyplot.axes(rectFactory.rect(), projection=tiler.crs)
+        lon0 = hypocenter.longitude
+        lat0 = hypocenter.latitude
+        ax.set_extent([lon0-8.0, lon0+8.0, lat0-4.0, lat0+4.0])
+        ax.add_image(tiler, tilerZoom, zorder=0, cmap="gray", interpolation="bessel")
+
+        # Epicenter
+        msize = self.config.getfloat("waveforms_map", "mechanism_size")
+        ax.scatter(hypocenter.longitude, hypocenter.latitude, transform=self.wgs84CRS, marker="*", c="c_ltred", edgecolors="black", s=msize**2, zorder=4)
+
+        # Stations
+        self._plot_stations(ax, data.stationsSM, color="c_blue", marker="^")
+        self._plot_stations(ax, data.stationsBB, color="c_ltgreen", marker="v")
+
+        plotsDir = os.path.expanduser(os.path.join(_data_filename(self.config, "plots")))
         if not os.path.isdir(plotsDir):
             os.makedirs(plotsDir)
-        map.figure.savefig(os.path.join(plotsDir, "stations_map.png"))
+        figure.savefig(os.path.join(plotsDir, "stations_map.jpg"))
         return
+
+    def _plot_stations(self, ax, stations, color, marker, show_labels=True, zorder=1):
+        if 0 == stations.count():
+            return
         
+        lonlat = {}
+        for tr in stations.traces:
+            key = "%s.%s" % (tr.stats.network, tr.stats.station,)
+            if not key in lonlat:
+                lonlat[key] = (tr.stats.longitude, tr.stats.latitude,)
+        coords = numpy.array(lonlat.values())
+        msize = self.config.getfloat("waveforms_map", "station_size")
+        ax.scatter(coords[:,0], coords[:,1], transform=self.wgs84CRS, marker="^", c=color, edgecolors="black", s=msize**2, alpha=0.7, zorder=zorder)
+
+        if show_labels:
+            for label,ll in zip(lonlat.keys(), lonlat.values()):
+                ax.text(ll[0], ll[1], label+" ", transform=self.wgs84CRS, ha='right', va='center', color="black")
+        
+        return
+    
 # ----------------------------------------------------------------------
 class RecordSection(object):
     """
     """
 
-    def __init__(self, params, showProgress):
-        self.params = params
+    def __init__(self, config, showProgress):
+        self.config = config
         self.showProgress = showProgress
         return
     
     
     def plot(self, data):
         from ast import literal_eval
-        from basemap.Figure import Figure
+
+        import matplotlib.pyplot as pyplot
+
+        import matplotlib_extras.colors
+        import matplotlib_extras
 
         hypocenter = data.hypocenter
 
         # Acceleration
         field = "acc"
         stream = data.accSM["data"]
-        tlength = self.params.getfloat("record_section", "time_window")
+        tlength = self.config.getfloat("record_section", "time_window")
         starttime = hypocenter.time
         endtime = starttime + tlength
         stream.trim(starttime, endtime, pad=True, fill_value=0.0)
         stream.rotate("NE->RT")
 
-        plotsDir = os.path.expanduser(os.path.join(_data_filename(self.params, "plots")))
+        plotsDir = os.path.expanduser(os.path.join(_data_filename(self.config, "plots")))
         if not os.path.isdir(plotsDir):
             os.makedirs(plotsDir)
 
         for component in ["R","T","Z"]:
             streamC = stream.select(component=component)
 
-            fig = Figure(color="lightbg", fontsize=10)
-            plotW = self.params.getfloat("record_section", "width_in")
-            plotH = self.params.getfloat("record_section", "height_in")
-            margins = literal_eval(self.params.get("noise_figure", "margins"))
-            fig.open(plotW, plotH, margins)
-            ax = fig.axes(1, 1, 1, 1)
+            plotW = self.config.getfloat("record_section", "width_in")
+            plotH = self.config.getfloat("record_section", "height_in")
+            figure = pyplot.figure(figsize=(plotW,plotH))
+            matplotlib_extras.colors.add_general()
+
+            margins = literal_eval(self.config.get("record_section", "margins"))
+            rectFactory = matplotlib_extras.axes.RectFactory(figure, margins=margins)
+            ax = pyplot.axes(rectFactory.rect())
                 
-            vscale = self.params.getfloat("record_section", "%s_per_km" % field)
+            vscale = self.config.getfloat("record_section", "%s_per_km" % field)
 
             for trace in streamC.traces:
                 distKm = 1.0e-3 * (trace.stats.distance**2 + hypocenter.depth**2)**0.5
                 t = trace.times(reftime=hypocenter.time)
                 ax.plot(t, distKm*(1.0 + distKm*trace.data/vscale), linewidth=0.5, color="c_blue")
-                if self.params.get("record_section", "show_labels"):
+                if self.config.get("record_section", "show_labels"):
                     label = "%s.%s" % (trace.stats.network, trace.stats.station)
                     ax.text(numpy.min(t), distKm, label, horizontalalignment="left", verticalalignment="bottom", fontsize=6, color="c_orange")
             ax.set_xlabel("Time (s)")
-            ax.set_ylabel("Epicentral Distance (km)")
+            ax.set_ylabel("Hypocentral Distance (km)")
             ax.set_xlim(0.0, tlength)
             ax.autoscale(axis="y", tight=True)
 
-            if self.params.getboolean("record_section", "show_wavespeeds"):
-                vp = self.params.getfloat("record_section", "vp_kmps")
-                vs = self.params.getfloat("record_section", "vs_kmps")
+            if self.config.getboolean("record_section", "show_wavespeeds"):
+                vp = self.config.getfloat("record_section", "vp_kmps")
+                vs = self.config.getfloat("record_section", "vs_kmps")
                 ymax = ax.get_ylim()[1]
                 ax.plot([0.0, ymax/vp], [0.0, ymax], color="c_orange", linewidth=2, alpha=0.5)
                 ax.text(ymax/vp, 0.995*ymax, "Vp={:3.1f}km/s".format(vp), color="c_orange", ha="left", va="top")
                 ax.plot([0.0, ymax/vs], [0.0, ymax], color="c_red", linewidth=2, alpha=0.5)
                 ax.text(ymax/vs, 0.995*ymax, "Vs={:3.1f}km/s".format(vs), color="c_red", ha="left", va="top")
             
-            fig.figure.savefig(os.path.join(plotsDir, "recordsection_%s_%s.pdf" % (field, component)))
+            figure.savefig(os.path.join(plotsDir, "recordsection_%s_%s.pdf" % (field, component)))
         
 
         # Velocity
