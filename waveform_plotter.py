@@ -898,7 +898,7 @@ class RecordSection(object):
             for trace in streamC.traces:
                 distKm = 1.0e-3 * (trace.stats.distance**2 + hypocenter.depth**2)**0.5
                 t = trace.times(reftime=hypocenter.time)
-                ax.plot(t, distKm*(1.0 + distKm*trace.data/vscale), linewidth=0.5, color="c_blue")
+                ax.plot(t, distKm + (distKm/vscale)**2*trace.data, linewidth=0.5, color="c_blue")
                 if self.config.get("record_section", "show_labels"):
                     label = "%s.%s" % (trace.stats.network, trace.stats.station)
                     ax.text(numpy.min(t), distKm, label, horizontalalignment="left", verticalalignment="bottom", fontsize=6, color="c_orange")
