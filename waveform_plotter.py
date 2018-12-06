@@ -871,6 +871,9 @@ class RecordSection(object):
         # Acceleration
         field = "acc"
         stream = data.accSM["data"]
+        if data.velBB:
+            stream += data.velBB["data"].copy().differentiate()
+        
         tlength = self.config.getfloat("record_section", "time_window")
         starttime = hypocenter.time
         endtime = starttime + tlength
