@@ -839,7 +839,7 @@ class StationsMap(object):
                 lonlat[key] = (tr.stats.longitude, tr.stats.latitude,)
         coords = numpy.array(lonlat.values())
         msize = self.config.getfloat("waveforms_map", "station_size")
-        ax.scatter(coords[:,0], coords[:,1], transform=self.wgs84CRS, marker="^", c=color, edgecolors="black", s=msize**2, alpha=0.7, zorder=zorder)
+        ax.scatter(coords[:,0], coords[:,1], transform=self.wgs84CRS, marker=marker, c=color, edgecolors="black", s=msize**2, alpha=0.7, zorder=zorder)
 
         if show_labels:
             for label,ll in zip(lonlat.keys(), lonlat.values()):
