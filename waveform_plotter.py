@@ -317,6 +317,11 @@ class WaveformData(object):
                 inventory += inventoryDC
 
         stream = self._get_raw_stream()
+        for bad_station in _config_get_list(self.params.get("stations", "blacklist")):
+            net, st, loc, ch = bad_station.split(".")
+            for tr in stream.select(network=net, station=st, location=loc, channel=ch):
+                stream.remove(tr)
+                                       
         stream.attach_response(inventory)
 
         # Add metadata
