@@ -360,21 +360,24 @@ class WaveformData(object):
         
         # Broadband velocity traces
         sVel = stream.select(channel="HH?")
+        sVel += stream.select(channel="BH?")
         sVel += stream.select(channel="EH?")
         sVel.remove_response(output="VEL")
         velBB = obspyutils.noise.denoise(sVel, wavelet, removeBg, zeroCoarse, zeroFine, preWindow, preThreshold, storeOrig, storeNoise)
         
-        # Rotate
-        for s in accSM.values() + velBB.values():
-            s = obspyutils.rotate.toENZ(inventory, s)
-
-        self.accSM = accSM
+        self.accSM = {}
+        for key,st in accSM.items():
+            self.accSM[key] = obspyutils.rotate.toENZ(inventory, st)
+        del accSM
         with open(_data_filename(self.params, "waveforms_acc"), "w") as fout:
-            cPickle.Pickler(fout, protocol=-1).dump(accSM)
+            cPickle.Pickler(fout, protocol=-1).dump(self.accSM)
 
-        self.velBB = velBB
+        self.velBB = {}
+        for key,st in velBB.items():
+            self.velBB[key] = obspyutils.rotate.toENZ(inventory, st)
+        del velBB
         with open(_data_filename(self.params, "waveforms_vel"), "w") as fout:
-            cPickle.Pickler(fout, protocol=-1).dump(velBB)
+            cPickle.Pickler(fout, protocol=-1).dump(self.velBB)
             
         return
 
@@ -428,11 +431,15 @@ class WaveformData(object):
             stream = self._get_raw_stream()
             self.stationsSM = stream.select(channel="HN?")
             self.stationsBB = stream.select(channel="HH?")
+            self.stationsBB += stream.select(channel="BH?")
+            self.stationsBB += stream.select(channel="EH?")
             obspyutils.metadata.addLocation(inventory, self.stationsSM)
             obspyutils.metadata.addLocation(inventory, self.stationsBB)
         else:
             self.stationsSM = inventory.select(channel="HN?")
             self.stationsBB = inventory.select(channel="HH?")
+            self.stationsBB += inventory.select(channel="BH?")
+            self.stationsBB += inventory.select(channel="EH?")
         return
     
     def _get_event(self):
